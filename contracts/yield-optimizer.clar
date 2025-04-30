@@ -220,3 +220,101 @@
     (ok true)
   )
 )
+
+;; Update yield information for a specific protocol
+(define-public (update-protocol-yield (protocol-name (string-ascii 64)) (new-yield uint))
+  (begin
+    ;; Only contract owner can update yields
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+    
+    ;; Check if protocol exists
+    (asserts! (not (is-eq (default-to none (map-get? protocol-addresses protocol-name)) none)) ERR_PROTOCOL_NOT_FOUND)
+    
+    ;; Update protocol yield
+    (map-set protocol-yields protocol-name new-yield)
+    
+    (ok true)
+  )
+)
+
+;; Enable or disable a protocol
+(define-public (toggle-protocol (protocol-name (string-ascii 64)) (enabled bool))
+  (begin
+    ;; Only contract owner can toggle protocols
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+    
+    ;; Check if protocol exists
+    (asserts! (not (is-eq (default-to none (map-get? protocol-addresses protocol-name)) none)) ERR_PROTOCOL_NOT_FOUND)
+    
+    ;; Update protocol status
+    (map-set protocol-enabled protocol-name enabled)
+    
+    (ok true)
+  )
+)
+
+;; Transfer contract ownership
+(define-public (transfer-ownership (new-owner principal))
+  (begin
+    ;; Only current owner can transfer ownership
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+    
+    ;; Update contract owner
+    (var-set contract-owner new-owner)
+    
+    (ok true)
+  )
+)
+
+;; Private helper functions
+
+;; Allocate new deposits to the best performing protocol
+(define-private (allocate-deposit (amount uint))
+  (let ((best-protocol (get protocol (get-best-protocol))))
+    (if (is-eq best-protocol "")
+        (ok true) ;; No protocols available, keep in contract
+        (begin
+          ;; Increment allocation for best protocol
+          (map-set protocol-allocations 
+                  best-protocol 
+                  (+ (default-to u0 (map-get? protocol-allocations best-protocol)) amount))
+          
+          ;; Here you would call the external protocol contract to deposit
+          ;; Example: (try! (contract-call? protocol-contract deposit amount))
+          ;; For hackathon purposes, we'll simulate this
+          
+          (ok true)
+        )
+    )
+  )
+)
+
+;; Withdraw funds from protocols based on current allocations
+(define-private (withdraw-from-protocols (amount uint))
+  (let ((remaining amount))
+    ;; Implementation would withdraw from protocols based on allocation
+    ;; For hackathon purposes, we'll simulate this
+    
+    ;; You would iterate through protocols and withdraw proportionally
+    ;; Example: (try! (contract-call? protocol-contract withdraw proportional-amount))
+    
+    (ok true)
+  )
+)
+
+;; Rebalance funds across protocols to maximize yield
+(define-private (perform-rebalance (best-protocol (string-ascii 64)))
+  (begin
+    ;; Implementation would withdraw from lower yielding protocols
+    ;; and deposit into the best protocol
+    ;; For hackathon purposes, we'll simulate this
+    
+    (ok true)
+  )
+)
+
+;; Contract initialization
+
+;; Initialize contract with default values
+(map-set protocol-yields "default" u0)
+(map-set protocol-enabled "default" false)
