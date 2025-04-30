@@ -149,3 +149,74 @@
     (ok share-amount)
   )
 )
+
+;; Withdraw sBTC by burning shares
+(define-public (withdraw (share-amount uint))
+  (let ((sender tx-sender)
+        (user-share-balance (default-to u0 (map-get? user-shares sender)))
+        (withdrawal-amount (calculate-withdrawal-amount share-amount)))
+    
+    ;; Check if user has enough shares
+    (asserts! (>= user-share-balance share-amount) ERR_INSUFFICIENT_BALANCE)
+    
+    ;; Update user shares
+    (map-set user-shares sender (- user-share-balance share-amount))
+    
+    ;; Update total shares
+    (var-set total-shares (- (var-get total-shares) share-amount))
+    
+    ;; Withdraw from protocols
+    (try! (withdraw-from-protocols withdrawal-amount))
+    
+    ;; Update user deposits and total deposits
+    (map-set user-deposits sender (- (default-to u0 (map-get? user-deposits sender)) withdrawal-amount))
+    (var-set total-deposits (- (var-get total-deposits) withdrawal-amount))
+    
+    ;; Transfer sBTC back to user
+    (as-contract
+      (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token transfer
+        withdrawal-amount
+        tx-sender
+        sender
+        none)
+    )
+  )
+)
+
+;; Trigger rebalancing of funds across protocols
+(define-public (rebalance)
+  (let ((best-protocol (get-best-protocol)))
+    ;; Check if there's enough time since last rebalance
+    (asserts! (> (- block-height (var-get last-rebalance-block)) u100) ERR_REBALANCE_THRESHOLD_NOT_MET)
+    
+    ;; Update last rebalance block
+    (var-set last-rebalance-block block-height)
+    
+    ;; Perform rebalancing logic
+    (try! (perform-rebalance (get protocol best-protocol)))
+    
+    (ok true)
+  )
+)
+
+;; Admin functions
+
+;; Add a new yield protocol to the system
+(define-public (add-protocol (protocol-name (string-ascii 64)) (protocol-address principal) (initial-yield uint))
+  (let ((protocol-index (var-get protocol-count)))
+    ;; Only contract owner can add protocols
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+    
+    ;; Add protocol to registry
+    (map-set protocol-registry protocol-index protocol-name)
+    (map-set protocol-addresses protocol-name protocol-address)
+    (map-set protocol-yields protocol-name initial-yield)
+    (map-set protocol-enabled protocol-name true)
+    (map-set protocol-allocations protocol-name u0)
+    
+    ;; Increment protocol count
+    (var-set protocol-count (+ protocol-index u1))
+    
+    (ok true)
+  )
+)
