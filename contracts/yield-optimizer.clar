@@ -273,15 +273,18 @@
   (let ((best-protocol (get protocol (get-best-protocol))))
     (if (is-eq best-protocol "")
         (ok true) ;; No protocols available, keep in contract
-        (begin
+        (let ((protocol-address (unwrap! (map-get? protocol-addresses best-protocol) ERR_PROTOCOL_NOT_FOUND)))
           ;; Increment allocation for best protocol
           (map-set protocol-allocations 
                   best-protocol 
                   (+ (default-to u0 (map-get? protocol-allocations best-protocol)) amount))
           
-          ;; Here you would call the external protocol contract to deposit
-          ;; Example: (try! (contract-call? protocol-contract deposit amount))
-          ;; For hackathon purposes, we'll simulate this
+          ;; Call the external protocol contract to deposit
+          (as-contract
+            (try! (contract-call? protocol-address deposit
+                    amount
+                    (as-contract tx-sender)))
+          )
           
           (ok true)
         )
