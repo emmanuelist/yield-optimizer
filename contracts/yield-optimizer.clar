@@ -356,6 +356,48 @@
   )
 )
 
+;; Helper function to withdraw from a protocol if its yield is lower than the best
+(define-private (withdraw-if-lower-yield 
+                  (protocol-index uint) 
+                  (current-result (response bool uint)))
+  (if (is-err current-result)
+      current-result
+      (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
+        (if (or (is-eq protocol-name "") (is-eq protocol-name best-protocol))
+            current-result
+            (let ((protocol-yield (default-to u0 (map-get? protocol-yields protocol-name)))
+                  (protocol-allocation (default-to u0 (map-get? protocol-allocations protocol-name)))
+                  (yield-difference (- best-yield protocol-yield)))
+              
+              ;; Only withdraw if yield difference exceeds the rebalance threshold
+              ;; and there are funds allocated
+              (if (or (< yield-difference (var-get rebalance-threshold)) (<= protocol-allocation u0))
+                  current-result
+                  (let ((protocol-address (unwrap! (map-get? protocol-addresses protocol-name) ERR_PROTOCOL_NOT_FOUND)))
+                    ;; Withdraw all funds from this lower-yielding protocol
+                    (let ((withdraw-result 
+                            (as-contract
+                              (contract-call? protocol-address withdraw
+                                protocol-allocation
+                                (as-contract tx-sender))
+                            )))
+                      (if (is-ok withdraw-result)
+                          (begin
+                            ;; Reset protocol allocation to zero
+                            (map-set protocol-allocations protocol-name u0)
+                            current-result
+                          )
+                          (err ERR_TRANSFER_FAILED)
+                      )
+                    )
+                  )
+              )
+            )
+        )
+      )
+  )
+)
+
 ;; Rebalance funds across protocols to maximize yield
 (define-private (perform-rebalance (best-protocol (string-ascii 64)))
   (begin
