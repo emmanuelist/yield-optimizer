@@ -28,7 +28,7 @@
 ;; Global state variables
 (define-data-var total-deposits uint u0)
 (define-data-var total-shares uint u0)
-(define-data-var last-rebalance-block uint block-height)
+(define-data-var last-rebalance-block uint stacks-block-height)
 (define-data-var rebalance-threshold uint u100) ;; 1% in basis points
 (define-data-var protocol-count uint u0)
 
@@ -187,10 +187,10 @@
 (define-public (rebalance)
   (let ((best-protocol (get-best-protocol)))
     ;; Check if there's enough time since last rebalance
-    (asserts! (> (- block-height (var-get last-rebalance-block)) u100) ERR_REBALANCE_THRESHOLD_NOT_MET)
+    (asserts! (> (- stacks-block-height (var-get last-rebalance-block)) u100) ERR_REBALANCE_THRESHOLD_NOT_MET)
     
     ;; Update last rebalance block
-    (var-set last-rebalance-block block-height)
+    (var-set last-rebalance-block stacks-block-height)
     
     ;; Perform rebalancing logic
     (try! (perform-rebalance (get protocol best-protocol)))
@@ -401,11 +401,48 @@
 ;; Rebalance funds across protocols to maximize yield
 (define-private (perform-rebalance (best-protocol (string-ascii 64)))
   (begin
-    ;; Implementation would withdraw from lower yielding protocols
-    ;; and deposit into the best protocol
-    ;; For hackathon purposes, we'll simulate this
-    
-    (ok true)
+    ;; Only proceed if we have a valid protocol
+    (if (is-eq best-protocol "")
+        (ok true)
+        (let ((best-protocol-address (unwrap! (map-get? protocol-addresses best-protocol) ERR_PROTOCOL_NOT_FOUND))
+              (best-protocol-yield (default-to u0 (map-get? protocol-yields best-protocol))))
+          
+          ;; Step 1: Calculate total assets to rebalance
+          (let ((total-to-rebalance (var-get total-deposits))
+                (current-best-allocation (default-to u0 (map-get? protocol-allocations best-protocol))))
+            
+            ;; Step 2: Withdraw from lower-yielding protocols
+            (try! (withdraw-from-lower-yield-protocols best-protocol best-protocol-yield))
+            
+            ;; Step 3: Deposit all available funds into best protocol
+            (let ((available-balance 
+                    (as-contract
+                      (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token get-balance 
+                        (as-contract tx-sender))
+                    )))
+              
+              (if (> available-balance u0)
+                  (as-contract
+                    (begin
+                      ;; Deposit to best protocol
+                      (try! (contract-call? best-protocol-address deposit
+                              available-balance
+                              (as-contract tx-sender)))
+                      
+                      ;; Update allocation for best protocol
+                      (map-set protocol-allocations 
+                              best-protocol 
+                              (+ current-best-allocation available-balance))
+                      
+                      (ok true)
+                    )
+                  )
+                  (ok true) ;; No funds to rebalance
+              )
+            )
+          )
+        )
+    )
   )
 )
 
