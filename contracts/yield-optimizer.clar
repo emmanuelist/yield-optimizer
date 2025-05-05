@@ -32,6 +32,10 @@
 (define-data-var rebalance-threshold uint u100) ;; 1% in basis points
 (define-data-var protocol-count uint u0)
 
+;; Temporary variables used for checking best protocol 
+(define-data-var best-protocol-name (string-ascii 64) "")
+(define-data-var best-protocol-yield uint u0)
+
 ;; User and protocol data maps
 (define-map user-deposits principal uint)
 (define-map user-shares principal uint)
@@ -95,23 +99,52 @@
   )
 )
 
-;; Find the protocol with the highest current yield
-(define-read-only (get-best-protocol)
-  (fold check-protocol-yield 
-        {protocol: "", yield: u0} 
-        (list 
-          u0 u1 u2 u3 u4 ;; Support up to 5 protocols
-        )
+;; Find the best protocol by checking each protocol in the registry
+(define-private (find-best-protocol)
+  (begin
+    ;; Initialize with empty values
+    (var-set best-protocol-name "")
+    (var-set best-protocol-yield u0)
+    
+    ;; Check each protocol and update the best one
+    (check-protocol-index u0)
+    (check-protocol-index u1)
+    (check-protocol-index u2)
+    (check-protocol-index u3)
+    (check-protocol-index u4)
+    
+    ;; Return the result
+    {best-name: (var-get best-protocol-name), best-yield: (var-get best-protocol-yield)}
   )
 )
 
-(define-private (check-protocol-yield (protocol-index uint) (current-best {protocol: (string-ascii 64), yield: uint}))
-  (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index)))
-        (protocol-yield (default-to u0 (map-get? protocol-yields protocol-name)))
-        (protocol-active (default-to false (map-get? protocol-enabled protocol-name))))
-    (if (and (not (is-eq protocol-name "")) protocol-active (> protocol-yield (get yield current-best)))
-        {protocol: protocol-name, yield: protocol-yield}
-        current-best)
+;; Helper function to check a protocol at given index and update the best if better
+(define-private (check-protocol-index (protocol-index uint))
+  (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
+    (if (not (is-eq protocol-name ""))
+        (let ((protocol-yield (default-to u0 (map-get? protocol-yields protocol-name)))
+              (protocol-active (default-to false (map-get? protocol-enabled protocol-name)))
+              (current-best-yield (var-get best-protocol-yield)))
+          
+          (if (and protocol-active (> protocol-yield current-best-yield))
+              (begin
+                ;; Update the best protocol
+                (var-set best-protocol-name protocol-name)
+                (var-set best-protocol-yield protocol-yield)
+                true)
+              false))
+        false)
+  )
+)
+
+;; Find the protocol with the highest current yield
+(define-public (get-best-protocol)
+  (let ((best-protocol (find-best-protocol)))
+    ;; Store best protocol info for use in contracts
+    (var-set best-protocol-name (get best-name best-protocol))
+    (var-set best-protocol-yield (get best-yield best-protocol))
+    
+    (ok (get best-name best-protocol))
   )
 )
 
@@ -185,15 +218,18 @@
 
 ;; Trigger rebalancing of funds across protocols
 (define-public (rebalance)
-  (let ((best-protocol (get-best-protocol)))
+  (begin
     ;; Check if there's enough time since last rebalance
     (asserts! (> (- stacks-block-height (var-get last-rebalance-block)) u100) ERR_REBALANCE_THRESHOLD_NOT_MET)
     
     ;; Update last rebalance block
     (var-set last-rebalance-block stacks-block-height)
     
-    ;; Perform rebalancing logic
-    (try! (perform-rebalance (get protocol best-protocol)))
+    ;; Get the best protocol first
+    (try! (get-best-protocol))
+    
+    ;; Perform rebalancing logic using the stored best protocol
+    (try! (perform-rebalance (var-get best-protocol-name)))
     
     (ok true)
   )
@@ -270,133 +306,152 @@
 
 ;; Allocate new deposits to the best performing protocol
 (define-private (allocate-deposit (amount uint))
-  (let ((best-protocol (get protocol (get-best-protocol))))
-    (if (is-eq best-protocol "")
-        (ok true) ;; No protocols available, keep in contract
-        (let ((protocol-address (unwrap! (map-get? protocol-addresses best-protocol) ERR_PROTOCOL_NOT_FOUND)))
-          ;; Increment allocation for best protocol
-          (map-set protocol-allocations 
-                  best-protocol 
-                  (+ (default-to u0 (map-get? protocol-allocations best-protocol)) amount))
-          
-          ;; Call the external protocol contract to deposit
-          (as-contract
-            (try! (contract-call? protocol-address deposit
-                    amount
-                    (as-contract tx-sender)))
-          )
-          
-          (ok true)
-        )
-    )
-  )
-)
-
-;; Withdraw funds from protocols based on current allocations
-(define-private (withdraw-from-protocols (amount uint))
-  (fold withdraw-from-protocol 
-        {remaining: amount, success: (ok true)} 
-        (list 
-          u0 u1 u2 u3 u4 ;; Support up to 5 protocols
-        )
-  )
-)
-
-;; Helper function to withdraw from a single protocol
-(define-private (withdraw-from-protocol 
-                  (protocol-index uint) 
-                  (state {remaining: uint, success: (response bool uint)}))
-  (let ((remaining (get remaining state))
-        (current-result (get success state)))
-    (if (or (<= remaining u0) (is-err current-result))
-        ;; If no more funds needed or previous error, return current state
-        state
-        (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
-          (if (is-eq protocol-name "")
-              ;; If no protocol at this index, continue to next
-              state
-              (let ((protocol-allocation (default-to u0 (map-get? protocol-allocations protocol-name)))
-                    (protocol-address (unwrap! (map-get? protocol-addresses protocol-name) 
-                                               (merge state {success: ERR_PROTOCOL_NOT_FOUND}))))
-                (if (<= protocol-allocation u0)
-                    ;; If no allocation in this protocol, continue to next
-                    state
-                    (let ((withdrawal-amount (min remaining protocol-allocation)))
-                      ;; Call the protocol to withdraw funds
-                      (let ((withdraw-result 
-                              (as-contract
-                                (contract-call? protocol-address withdraw
-                                  withdrawal-amount
-                                  (as-contract tx-sender))
-                              )))
-                        (if (is-ok withdraw-result)
-                            ;; Update protocol allocation and continue
-                            (begin
-                              (map-set protocol-allocations 
-                                      protocol-name 
-                                      (- protocol-allocation withdrawal-amount))
-                              {remaining: (- remaining withdrawal-amount), success: (ok true)}
-                            )
-                            ;; If withdrawal failed, propagate the error
-                            {remaining: remaining, success: (err ERR_TRANSFER_FAILED)}
-                        ))
-                    ))
+  (begin
+    ;; First get the best protocol
+    (try! (get-best-protocol))
+    
+    (let ((best-protocol (var-get best-protocol-name)))
+      (if (is-eq best-protocol "")
+          (ok true) ;; No protocols available, keep in contract
+              (let ((protocol-address (unwrap! (map-get? protocol-addresses best-protocol) ERR_PROTOCOL_NOT_FOUND)))
+                ;; Increment allocation for best protocol
+                (map-set protocol-allocations 
+                        best-protocol 
+                        (+ (default-to u0 (map-get? protocol-allocations best-protocol)) amount))
+                
+                ;; Call the external protocol contract to deposit
+                (as-contract
+                  (try! (contract-call? protocol-address deposit
+                          amount
+                          (as-contract tx-sender)))
                 )
+                
+                (ok true)
               )
           )
         )
     )
+  )
+
+;; Additional temporary variables for withdraw operations
+(define-data-var remaining-amount uint u0)
+(define-data-var withdrawal-result (response bool uint) (ok true))
+(define-data-var rebalance-result (response bool uint) (ok true))
+
+;; Withdraw funds from protocols based on current allocations
+(define-private (withdraw-from-protocols (amount uint))
+  (begin
+    (var-set remaining-amount amount)
+    (var-set withdrawal-result (ok true))
+    
+    ;; Try to withdraw from each protocol until the amount is satisfied
+    (map try-withdraw-from-protocol (list u0 u1 u2 u3 u4))
+    
+    (var-get withdrawal-result)
+  )
 )
+
+(define-private (try-withdraw-from-protocol (protocol-index uint))
+  (let ((remaining (var-get remaining-amount))
+        (current-result (var-get withdrawal-result)))
+    (if (or (<= remaining u0) (is-err current-result))
+        false  ;; Skip if already done or error occurred
+        (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
+          (if (is-eq protocol-name "")
+              false  ;; No protocol at this index
+              (let ((protocol-allocation (default-to u0 (map-get? protocol-allocations protocol-name)))
+                    (protocol-address-opt (map-get? protocol-addresses protocol-name)))
+                (if (or (<= protocol-allocation u0) (is-none protocol-address-opt))
+                    false  ;; No allocation or no address
+                    (let ((protocol-address (unwrap! protocol-address-opt 
+                                             (begin
+                                               (var-set withdrawal-result ERR_PROTOCOL_NOT_FOUND)
+                                               false))))
+                      (let ((withdrawal-amount (if (< remaining protocol-allocation) 
+                                                  remaining 
+                                                  protocol-allocation)))
+                        ;; Call the protocol to withdraw funds
+                        (let ((withdraw-result 
+                                (as-contract
+                                  (contract-call? protocol-address withdraw
+                                    withdrawal-amount
+                                    (as-contract tx-sender))
+                                )))
+                          (if (is-ok withdraw-result)
+                              (begin
+                                ;; Update protocol allocation
+                                (map-set protocol-allocations 
+                                        protocol-name 
+                                        (- protocol-allocation withdrawal-amount))
+                                (var-set remaining-amount (- remaining withdrawal-amount))
+                                true)
+                              (begin
+                                ;; Set error
+                                (var-set withdrawal-result ERR_TRANSFER_FAILED)
+                                false))
+                        ))))
+              ))
+          )
+        )
+    )
+  )
 
 ;; Helper function to withdraw funds from lower-yielding protocols
 (define-private (withdraw-from-lower-yield-protocols (best-protocol (string-ascii 64)) (best-yield uint))
-  (fold withdraw-if-lower-yield
-        (ok true)
-        (list u0 u1 u2 u3 u4) ;; Support up to 5 protocols
+  (begin
+    (var-set rebalance-result (ok true))
+    
+    ;; Check each protocol and withdraw from lower-yielding ones
+    (map withdraw-if-lower-yield-protocol (list u0 u1 u2 u3 u4))
+    
+    (var-get rebalance-result)
   )
 )
 
 ;; Helper function to withdraw from a protocol if its yield is lower than the best
-(define-private (withdraw-if-lower-yield 
-                  (protocol-index uint) 
-                  (current-result (response bool uint)))
-  (if (is-err current-result)
-      current-result
-      (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
-        (if (or (is-eq protocol-name "") (is-eq protocol-name best-protocol))
-            current-result
-            (let ((protocol-yield (default-to u0 (map-get? protocol-yields protocol-name)))
-                  (protocol-allocation (default-to u0 (map-get? protocol-allocations protocol-name)))
-                  (yield-difference (- best-yield protocol-yield)))
-              
-              ;; Only withdraw if yield difference exceeds the rebalance threshold
-              ;; and there are funds allocated
-              (if (or (< yield-difference (var-get rebalance-threshold)) (<= protocol-allocation u0))
-                  current-result
-                  (let ((protocol-address (unwrap! (map-get? protocol-addresses protocol-name) ERR_PROTOCOL_NOT_FOUND)))
-                    ;; Withdraw all funds from this lower-yielding protocol
-                    (let ((withdraw-result 
-                            (as-contract
-                              (contract-call? protocol-address withdraw
-                                protocol-allocation
-                                (as-contract tx-sender))
-                            )))
-                      (if (is-ok withdraw-result)
+(define-private (withdraw-if-lower-yield-protocol (protocol-index uint))
+  (let ((current-result (var-get rebalance-result)))
+    (if (is-err current-result)
+        false  ;; Skip if there's already an error
+        (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
+          (if (or (is-eq protocol-name "") (is-eq protocol-name (var-get best-protocol-name)))
+              false  ;; Skip if no protocol at this index or it's the best protocol
+              (let ((protocol-yield (default-to u0 (map-get? protocol-yields protocol-name)))
+                    (protocol-allocation (default-to u0 (map-get? protocol-allocations protocol-name)))
+                    (yield-difference (- best-yield protocol-yield)))
+                
+                ;; Only withdraw if yield difference exceeds the rebalance threshold
+                ;; and there are funds allocated
+                (if (or (< yield-difference (var-get rebalance-threshold)) (<= protocol-allocation u0))
+                    false  ;; Skip if threshold not met or no allocation
+                    (let ((protocol-address-opt (map-get? protocol-addresses protocol-name)))
+                      (if (is-none protocol-address-opt)
                           (begin
-                            ;; Reset protocol allocation to zero
-                            (map-set protocol-allocations protocol-name u0)
-                            current-result
-                          )
-                          (err ERR_TRANSFER_FAILED)
-                      )
-                    )
-                  )
-              )
-            )
+                            (var-set rebalance-result ERR_PROTOCOL_NOT_FOUND)
+                            false)
+                          (let ((protocol-address (unwrap-panic protocol-address-opt)))
+                            ;; Withdraw all funds from this lower-yielding protocol
+                            (let ((withdraw-result 
+                                    (as-contract
+                                      (contract-call? protocol-address withdraw
+                                        protocol-allocation
+                                        (as-contract tx-sender))
+                                    )))
+                              (if (is-ok withdraw-result)
+                                  (begin
+                                    ;; Reset protocol allocation to zero
+                                    (map-set protocol-allocations protocol-name u0)
+                                    true)
+                                  (begin
+                                    (var-set rebalance-result (err ERR_TRANSFER_FAILED))
+                                    false))
+                            ))))
+                )
+              ))
+          )
         )
-      )
+    )
   )
-)
 
 ;; Rebalance funds across protocols to maximize yield
 (define-private (perform-rebalance (best-protocol (string-ascii 64)))
