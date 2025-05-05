@@ -294,16 +294,60 @@
 
 ;; Withdraw funds from protocols based on current allocations
 (define-private (withdraw-from-protocols (amount uint))
-  (let ((remaining amount))
-    ;; Implementation would withdraw from protocols based on allocation
-    ;; For hackathon purposes, we'll simulate this
-    
-    ;; You would iterate through protocols and withdraw proportionally
-    ;; Example: (try! (contract-call? protocol-contract withdraw proportional-amount))
-    
-    (ok true)
+  (fold withdraw-from-protocol 
+        {remaining: amount, success: (ok true)} 
+        (list 
+          u0 u1 u2 u3 u4 ;; Support up to 5 protocols
+        )
   )
 )
+
+;; Helper function to withdraw from a single protocol
+(define-private (withdraw-from-protocol 
+                  (protocol-index uint) 
+                  (state {remaining: uint, success: (response bool uint)}))
+  (let ((remaining (get remaining state))
+        (current-result (get success state)))
+    (if (or (<= remaining u0) (is-err current-result))
+        ;; If no more funds needed or previous error, return current state
+        state
+        (let ((protocol-name (default-to "" (map-get? protocol-registry protocol-index))))
+          (if (is-eq protocol-name "")
+              ;; If no protocol at this index, continue to next
+              state
+              (let ((protocol-allocation (default-to u0 (map-get? protocol-allocations protocol-name)))
+                    (protocol-address (unwrap! (map-get? protocol-addresses protocol-name) 
+                                               (merge state {success: ERR_PROTOCOL_NOT_FOUND}))))
+                (if (<= protocol-allocation u0)
+                    ;; If no allocation in this protocol, continue to next
+                    state
+                    (let ((withdrawal-amount (min remaining protocol-allocation)))
+                      ;; Call the protocol to withdraw funds
+                      (let ((withdraw-result 
+                              (as-contract
+                                (contract-call? protocol-address withdraw
+                                  withdrawal-amount
+                                  (as-contract tx-sender))
+                              )))
+                        (if (is-ok withdraw-result)
+                            ;; Update protocol allocation and continue
+                            (begin
+                              (map-set protocol-allocations 
+                                      protocol-name 
+                                      (- protocol-allocation withdrawal-amount))
+                              {remaining: (- remaining withdrawal-amount), success: (ok true)}
+                            )
+                            ;; If withdrawal failed, propagate the error
+                            {remaining: remaining, success: (err ERR_TRANSFER_FAILED)}
+                        ))
+                    ))
+                )
+              )
+          )
+        )
+    )
+)
+
 
 ;; Rebalance funds across protocols to maximize yield
 (define-private (perform-rebalance (best-protocol (string-ascii 64)))
