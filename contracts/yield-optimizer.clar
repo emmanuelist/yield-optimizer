@@ -348,6 +348,13 @@
     )
 )
 
+;; Helper function to withdraw funds from lower-yielding protocols
+(define-private (withdraw-from-lower-yield-protocols (best-protocol (string-ascii 64)) (best-yield uint))
+  (fold withdraw-if-lower-yield
+        (ok true)
+        (list u0 u1 u2 u3 u4) ;; Support up to 5 protocols
+  )
+)
 
 ;; Rebalance funds across protocols to maximize yield
 (define-private (perform-rebalance (best-protocol (string-ascii 64)))
